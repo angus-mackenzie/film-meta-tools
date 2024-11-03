@@ -1,0 +1,139 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+# Get the script's directory and source film-utils.sh
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/film-utils.sh
+if ! source "${SCRIPT_DIR}/film-utils.sh"; then
+    echo "Error: Could not source film-utils.sh" >&2
+    exit 1
+fi
+
+# Script variables
+directory=""
+name=""
+update_date=true
+current_date=$(date +"%Y:%m:%d %H:%M:%S")
+iso=""
+copyright="$DEFAULT_COPYRIGHT"
+
+show_help() {
+    cat << EOF
+Usage: $(basename "$0") <directory> [options]
+
+Options:
+  --name <prefix>    Set filename prefix (defaults to timestamp)
+  --date <date>      Set date (defaults to current date)
+  --no-date          Keep original dates
+  --iso <value>      Set ISO value (only if not already set)
+  --copyright <text> Set copyright (defaults to '$DEFAULT_COPYRIGHT')
+  --help             Show this help message
+EOF
+}
+
+process_file() {
+    local file="$1"
+    local count="$2"
+    local ext="${file##*.}"
+    local new_name
+    new_name="${name}_$(printf "%03d" "$count").$ext"
+    local exif_year
+    
+    exif_year=$(get_exif_year "$file")
+    
+    # Build exiftool command
+    local exiftool_cmd=(-m -overwrite_original)
+    exiftool_cmd+=(-FileName="$new_name")
+    exiftool_cmd+=(-copyright="$copyright")
+    
+    # Add ISO if specified
+    [[ -n "$iso" ]] && exiftool_cmd+=(-exif:iso="$iso" -if "not \$exif:iso")
+    
+    # Update dates if needed
+    if [[ "$update_date" == true ]] && is_suspicious_year "$exif_year"; then
+        exiftool_cmd+=(-ExifIFD:CreateDate="$current_date")
+        exiftool_cmd+=(-ExifIFD:DateTimeOriginal="$current_date")
+    fi
+    
+    if ! exiftool "${exiftool_cmd[@]}" "$file"; then
+        echo "Error processing file: $file" >&2
+        return 1
+    fi
+    
+    echo "Processed: $file -> $new_name"
+}
+
+main() {
+    local count=1
+    
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --help|-h)
+                show_help
+                exit 0
+                ;;
+            --name)
+                name="$2"
+                shift 2
+                ;;
+            --date)
+                current_date="$2"
+                shift 2
+                ;;
+            --no-date)
+                update_date=false
+                shift
+                ;;
+            --iso)
+                iso="$2"
+                shift 2
+                ;;
+            --copyright)
+                copyright="$2"
+                shift 2
+                ;;
+            -*)
+                echo "Error: Unknown option: $1" >&2
+                show_help
+                exit 1
+                ;;
+            *)
+                if [[ -z "$directory" ]]; then
+                    directory="$1"
+                else
+                    echo "Error: Unexpected argument: $1" >&2
+                    show_help
+                    exit 1
+                fi
+                shift
+                ;;
+        esac
+    done
+    
+    # Validate arguments
+    if [[ -z "$directory" ]]; then
+        echo "Error: Directory not specified" >&2
+        show_help
+        exit 1
+    fi
+    
+    if [[ ! -d "$directory" ]]; then
+        echo "Error: Directory does not exist: $directory" >&2
+        exit 1
+    fi
+    
+    # Process files
+    while IFS= read -r -d '' file; do
+        if [[ -f "$file" ]] && is_image_file "$file"; then
+            process_file "$file" "$count" || continue
+            ((count++))
+        fi
+    done < <(find "$directory" -type f -print0)
+}
+
+# Run main if not sourced
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi 
